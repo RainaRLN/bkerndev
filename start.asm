@@ -32,9 +32,9 @@ mboot:
     dd end
     dd start
 
-; 死循环
-; 之后我们将在'jmp $'前插入'extern _main'和'call _main'两句代码
 stublet:
+    extern main
+    call main
     jmp $
 
 

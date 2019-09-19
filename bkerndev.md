@@ -199,9 +199,9 @@ echo Done!
 pause
 ```
 
-#### 64位Linux下的链接脚本
+### PS: 下面是我自己写的
 
-我自己写的:
+#### 64位Linux下的编译脚本
 
 > build.sh
 
@@ -221,4 +221,227 @@ echo "Done!"
 ```bash
 bash build.sh
 ```
+
+## 04-创建main函数和链接C文件
+
+&emsp;&emsp;一般C语言使用main()函数作为程序的入口点, 为了符合我们平时的编程习惯, 这里我们也使用main()函数作为C代码的入口点, 并在"start.asm"文件中添加中断服务程序来调用C函数。
+
+&emsp;&emsp;在这一节教程,我们将尝试创建一个"main.c"文件和一个包含常用函数原型的头文件"system.h"。"main.c"中包含mian()函数, 它将作为你C代码的入口。在内核开发中, 我们一般不从main()函数返回。多数操作系统在main中初始化内核和子程序、加载shell, 然后main函数会进入空循环中。在多任务系统中, 当没有其他需要运行的任务时, 将一直执行这个空循环。下面是"main.c"文件的示例,其中包含了最基本的main()函数和一些我们以后会用到的函数体。
+
+> main.c
+
+```cpp
+#include <system.h>
+
+/* 你将要自己完成这些代码  */
+unsigned char *memcpy(unsigned char *dest, const unsigned char *src, int count)
+{
+    /* 在此处添加代码, 将'src'中count字节的数据复制到'dest'中, 
+     *  最后返回'dest' */
+}
+
+unsigned char *memset(unsigned char *dest, unsigned char val, int count)
+{
+    /* 在此处添加代码, 将'dest'中的count字节全部设置成值'val', 
+     * 最后返回'dest' */
+}
+
+unsigned short *memsetw(unsigned short *dest, unsigned short val, int count)
+{
+    /* 在此处添加代码, 将'dest'中的count双字节设置成值'val', 
+     * 最后返回'dest' 
+     * 注意'val'是双字节 16-bit*/
+}
+
+int strlen(const char *str)
+{
+    /* 返回字符串的长度
+     * 遇到某个字节的值为0x00结束 */
+}
+
+/* 我们之后将使用这个函数通过IO端口从设备读取数据, 如键盘等
+ * 我们使用内联汇编代码(inline assembly)实现该功能 */
+unsigned char inportb (unsigned short _port)
+{
+    unsigned char rv;
+    __asm__ __volatile__ ("inb %1, %0" : "=a" (rv) : "dN" (_port));
+    return rv;
+}
+
+/* 我们将使用这个函数通过I/O端口向设备写数据
+ * 用来修改文本模式和光标位置
+ * 同样,我们使用内联汇编来实现这个单用C无法实现的功能 */
+void outportb (unsigned short _port, unsigned char _data)
+{
+    __asm__ __volatile__ ("outb %1, %0" : : "dN" (_port), "a" (_data));
+}
+
+/* 这是一个非常简单的main函数, 它内部仅进行死循环 */
+void main()
+{
+    /* 你可以在这里添加语句 */
+
+    /* 保留此循环
+    *  不过, 在'start.asm'里也有一个无限循环, 防止你不小心删除了下面这一行*/
+    for (;;);
+}
+```
+
+&emsp;&emsp;在你编译之前, 我们需要在'start.asm'中添加2行代码。我们需要让编译器知道main()在外部文件中, 我们还需要从'start.asm'文件中调用main()函数。打开'start.asm'文件, 在`stublet:`的下面添加下面2行代码: 
+
+```assembly
+	extern _main
+	call _main
+```
+
+&emsp;&emsp;先等等编译, `_main`前面的下划线是什么东西, 我们在C语言里声明的是`main`啊？编译器gcc在编译时会在所有函数和变量名前面加上下划线。因此, 要从汇编中引用C文件中的函数和变量, 我们都需要在前面加上下划线！
+
+&emsp;&emsp;现在我们还缺少一个"system.h"文件。创建一个名为"include"的文件夹, 在该文件加下创建一个名为"system.h"的空白文本文件, 将`mencpy`、`memset`、`memsetw`、`strlen`、`inportb`、`outportb`这些函数的函数原型添加到该头文件中。`#ifndef`、`#define`、`#endif`用于防止头文件被多次声明。这个头文件用来包含你在内核中使用的所有函数, 你可以随意添加你需要的函数来扩展此库。
+
+> include/system.h
+
+```cpp
+#ifndef __SYSTEM_H
+#define __SYSTEM_H
+
+/* MAIN.C */
+extern unsigned char *memcpy(unsigned char *dest, const unsigned char *src, int count);
+extern unsigned char *memset(unsigned char *dest, unsigned char val, int count);
+extern unsigned short *memsetw(unsigned short *dest, unsigned short val, int count);
+extern int strlen(const char *str);
+extern unsigned char inportb (unsigned short _port);
+extern void outportb (unsigned short _port, unsigned char _data);
+
+#endif
+```
+
+&emsp;&emsp;接下来, 我们要来编译这些文件。打开之前的"build.bat"文件, 添加下面一行命令来编译你的"main.c"。这个命令运行了gcc编译器, `gcc`后面有一堆参数: 
+
+- `-Wall`用于显示所有的警告
+- `-O`、`-fstrength-reduce`、`-fomit-frame-pointer`、`-finline-functions`用于编译优化
+- `-nostdinc`和`-fno-builtin`告诉编译器我们将不适用C标准库函数
+- `-I./include`告诉编译器我们的头文件在当前文件夹下的"include"文件夹里
+- `-c`表示当前仅编译, 不链接
+- `-o main.o`表示输出文件名为main.o
+- `main.c`是我们要编译的文件
+
+```bash
+gcc -Wall -O -fstrength-reduce -fomit-frame-pointer -finline-functions -nostdinc -fno-builtin -I./include -c -o main.o main.c
+```
+
+&emsp;&emsp;别忘了, 按照"build.bat"文件中的指示, 把"main.o"添加到链接文件的列表中去。像这样: 
+
+```bash
+ld -T link.ld -o kernel.bin start.o main.o
+```
+
+&emsp;&emsp;当前完整的"build.bat"文件内容如下: 
+
+> build.bat
+
+```bash
+echo Now assembling, compiling, and linking your kernel:
+nasm -f aout -o start.o start.asm
+rem Remember this spot here: We will add 'gcc' commands here to compile C sources
+gcc -Wall -O -fstrength-reduce -fomit-frame-pointer -finline-functions -nostdinc -fno-builtin -I./include -c -o main.o main.c
+
+
+rem This links all your files. Remember that as you add *.o files, you need to
+rem add them after start.o. If you don't add them at all, they won't be in your kernel!
+ld -T link.ld -o kernel.bin start.o main.o
+echo Done!
+pause
+```
+
+&emsp;&emsp;最后, 如果你不知道该怎么实现那些附加函数, 如`memcpy`函数, 这里有一份参考代码: 
+
+```cpp
+#include <system.h>
+
+unsigned char *memcpy(unsigned char *dest, const unsigned char *src, int count)
+{
+    const unsigned char *sp = (const unsigned char *)src;
+    unsigned char *dp = dest;
+    for(; count != 0; count--) *dp++ = *sp++;
+    return dest;
+}
+
+unsigned char *memset(unsigned char *dest, unsigned char val, int count)
+{
+    unsigned char *temp = (unsigned char *)dest;
+    for( ; count != 0; count--) *temp++ = val;
+    return dest;
+}
+
+unsigned short *memsetw(unsigned short *dest, unsigned short val, int count)
+{
+    unsigned short *temp = (unsigned short *)dest;
+    for( ; count != 0; count--) *temp++ = val;
+    return dest;
+}
+
+int strlen(const char *str)
+{
+    int retval;
+    for(retval = 0; *str != '\0'; str++) retval++;
+    return retval;
+}
+
+/* 我们之后将使用这个函数通过IO端口从设备读取数据, 如键盘等
+ * 我们使用内联汇编代码(inline assembly)实现该功能 */
+unsigned char inportb (unsigned short _port)
+{
+    unsigned char rv;
+    __asm__ __volatile__ ("inb %1, %0" : "=a" (rv) : "dN" (_port));
+    return rv;
+}
+
+/* 我们将使用这个函数通过I/O端口向设备写数据
+ * 用来修改文本模式和光标位置
+ * 同样,我们使用内联汇编来实现这个单用C无法实现的功能 */
+void outportb (unsigned short _port, unsigned char _data)
+{
+    __asm__ __volatile__ ("outb %1, %0" : : "dN" (_port), "a" (_data));
+}
+
+/* 这是一个非常简单的main函数, 它内部仅进行死循环 */
+void main()
+{
+    /* 你可以在这里添加语句 */
+
+    /* 保留此循环
+    *  不过, 在'start.asm'里也有一个无限循环, 防止你不小心删除了下面这一行*/
+    for (;;);
+}
+```
+
+### PS: 下面是我自己写的
+
+#### Win10安装gcc编译器
+
+&emsp;&emsp;Win10安装gcc、g++、make: https://www.cnblogs.com/raina/p/10656106.html
+
+#### 本节教程对应的Linux下的编译脚本
+
+```bash
+echo "Now assembling, compiling, and linking your kernel:"
+nasm -f elf64 -o start.o start.asm
+# Remember this spot here: We will add 'gcc' commands here to compile C sources
+gcc -Wall -O -fstrength-reduce -fomit-frame-pointer -finline-functions -nostdinc -fno-builtin -I./include -c -o main.o main.c
+
+# This links all your files. Remember that as you add *.o files, you need to
+# add them after start.o. If you don't add them at all, they won't be in your kernel!
+ld -T link.ld -o kernel.bin start.o main.o
+echo "Done!"
+read -p "Press a key to continue..."
+```
+
+#### \_main的问题
+
+&emsp;&emsp;我的gcc版本是7.4.0, 在编译C程序时并没有在函数和变量名前面自己加下划线, 所以按照原教程写的汇编代码, 编译后会报下面的错误: 
+
+> start.o: In function `stublet':
+> start.asm:(.text+0x29): undefined reference to `_main'
+
+把"start.asm"里`_main`的下划线去掉, 再编译就行了。
 
