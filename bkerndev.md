@@ -1,4 +1,4 @@
-## 01-前言
+01-前言
 
 &emsp;&emsp;内核开发不是件容易的事, 这是对一个程序员编程能力的考验。开发内核其实就是开发一个能够与硬件交互和管理硬件的软件。内核也是一个操作系统的核心, 是管理硬件资源的逻辑。
 
@@ -445,3 +445,334 @@ read -p "Press a key to continue..."
 
 把"start.asm"里`_main`的下划线去掉, 再编译就行了。
 
+## 05-打印到屏幕
+
+&emsp;&emsp;现在, 我们需要尝试打印到屏幕上。为此, 我们需要管理屏幕滚动, 如果能允许使用不同的颜色就更好了。好在VGA视频卡为我们提供了一片内存空间, 允许同时写入属性字节和字符字节对, 可以更简单地在屏幕上显示信息。VGA控制器负责自动绘制屏幕上的更新。屏幕滚动由内核软件来管理。从技术上讲, 这将是我们写的第一个驱动程序。
+
+&emsp;&emsp;如上所述, 文本空间只是我们地址空间的一块存储区域, 这片缓冲区位于物理内存的0xB800地址, 缓冲区的数据类型为"short"类型, 这意味着这片文本存储序列的每一项是16bit的, 而不是我们认为的8bit。每个16bit元素可以被分解为高8位和低8位。低8位用于告诉显示控制器在屏幕上绘制什么字符, 称为"字符字节(character byte)"; 高8位称为"属性字节(attribute byte)", 用于定义要绘制字符的前景色和背景色。
+
+<table cols="50,50,50,50,100,100">
+    <tr>
+        <td width="50" align="left">
+            15
+        </td>
+        <td width="50" align="right">
+            12
+        </td>
+        <td width="50" align="left">
+            11
+        </td>
+        <td width="50" align="right">
+            8
+        </td>
+        <td width="100" align="left">
+            7
+        </td>
+        <td width="100" align="right">
+            0
+        </td>
+    </tr>
+</table>
+<table cols="100, 100, 200" border="1">
+    <tr>
+        <td width="100" align="center">
+            Backcolor
+        </td>
+        <td width="100" align="center">
+            Forecolor
+        </td>
+        <td width="200" align="center">
+            Character
+        </td>
+    </tr>
+</table>
+
+由于只有4位用来表示1种颜色, 所以最多只能表示16种不同颜色, 下面是默认的16色调色板: 
+
+<table cols="50, 200, 50, 200">
+    <tr>
+      <th align="left" width="50">Value</th>
+      <th align="left" width="200">Color</th>
+      <th align="left" width="50">Value</th>
+      <th align="left" width="200">Color</th>
+    </tr>
+    <tr>
+      <td width="50">
+        0
+      </td>
+      <td width="200">
+        <font color="black">BLACK</font>
+      </td>
+      <td width="50">
+        8
+      </td>
+      <td width="200">
+        <font color="#444444">DARK GREY</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        1
+      </td>
+      <td width="200">
+        <font color="#0000FF">BLUE</font>
+      </td>
+      <td width="50">
+        9
+      </td>
+      <td width="200">
+        <font color="#3399FF">LIGHT BLUE</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        2
+      </td>
+      <td width="200">
+        <font color="#00FF00">GREEN</font>
+      </td>
+      <td width="50">
+        10
+      </td>
+      <td width="200">
+        <font color="#99FF66">LIGHT GREEN</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        3
+      </td>
+      <td width="200">
+        <font color="#00FFFF">CYAN</font>
+      </td>
+      <td width="50">
+        11
+      </td>
+      <td width="200">
+        <font color="#CCFFFF">LIGHT CYAN</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        4
+      </td>
+      <td width="200">
+        <font color="#FF0000">RED</font>
+      </td>
+      <td width="50">
+        12
+      </td>
+      <td width="200">
+        <font color="#FF6600">LIGHT RED</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        5
+      </td>
+      <td width="200">
+        <font color="#CC0099">MAGENTA</font>
+      </td>
+      <td width="50">
+        13
+      </td>
+      <td width="200">
+        <font color="#FF66FF">LIGHT MAGENTA</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        6
+      </td>
+      <td width="200">
+        <font color="#663300">BROWN</font>
+      </td>
+      <td width="50">
+        14
+      </td>
+      <td width="200">
+        <font color="#CC6600">LIGHT BROWN</font>
+      </td>
+    </tr>
+    <tr>
+      <td width="50">
+        7
+      </td>
+      <td width="200">
+        <font color="#CCCCCC">LIGHT GREY</font>
+      </td>
+      <td width="50">
+        15
+      </td>
+      <td width="200">
+        <font color="grey">WHITE</font>
+      </td>
+    </tr>
+</table>
+
+&emsp;&emsp;最后, 文本模式存储器是一片线性的区域, 每行文本在内存中是连续的。但是视频控制器让它看上去像一个大小为80x25、值为16bit的矩阵(25行x80个字符)。为了把屏幕上的字符位置和内存索引对应, 我们需要用到下面的公式: 
+$$
+index = (y\_value * width\_of\_screen) + x\_value;
+$$
+举个例子, 如果我们要在屏幕(3, 4)的位置上显示字符`character`, 则它在内存中的索引为`4 * 80 + 3`为323, 程序的代码类似于这样: 
+
+```cpp
+unsigned short *where = (unsigned short *)0xB8000 + 323;
+*where = character | (attribute << 8);
+```
+
+&emsp;&emsp;下面是"scrn.c"文件的内容, 该文件包含我们用于处理屏幕的所有函数。包含"system.h"方便我们调用`outportb`、`memcpy`、`memset`、`memsetw`和`strlen`函数。我们使用的滚动方法非常有趣: 我们从第1行开始获取文本存储块, 并将其复制到顶部的第0行。这就将整个屏幕向上移动了一行。 为了完成滚动, 我们通过写入空格来擦除文本的最后一行。 `putch`函数可能是此文件中最复杂的函数, 因为它需要处理换行符('\n'), 回车符('\r')和退格键('\ b')。 如果你愿意, 可以处理警报字符('\a'-ASCII值为7), 在遇到报警符时发出一声短促的哔声。 我还提供了一个设置屏幕颜色的函数`settextcolor`。
+
+> scrn.c
+
+```cpp
+#include <system.h>
+
+unsigned short *textmemptr;  // 文本指针
+int attrib = 0x0F;  // 属性
+int csr_x = 0, csr_y = 0;  // x和y的坐标
+
+/* 屏幕滚动 */
+void scroll(void)
+{
+    unsigned blank, temp;
+
+    /* 空格 */
+    blank = 0x20 | (attrib << 8);
+
+    /* 第25行是最后一行, 我们需要向上滚动了 */
+    if(csr_y >= 25)
+    {
+        /* 将24行往上平移一行 */
+        temp = csr_y - 25 + 1;
+        memcpy (textmemptr, textmemptr + temp * 80, (25 - temp) * 80 * 2);
+
+        /* 最后一行填充空格 */
+        memsetw (textmemptr + (25 - temp) * 80, blank, 80);
+        csr_y = 25 - 1;
+    }
+}
+
+/* 更新光标位置: 在最后一个字符下添加一条闪烁的下划线 */
+void move_csr(void)
+{
+    unsigned temp;
+
+    /* 虚拟坐标与物理地址转换的公式:
+     * Index = [(y * width) + x] */
+    temp = csr_y * 80 + csr_x;
+
+    /* 往VAG的CRT控制寄存器内发送命令, 设置光标的高地址和低地址
+     * 想了解更多细节, 需要查找VGA编程文档 */
+    outportb(0x3D4, 14);  // 设置光标高8位地址
+    outportb(0x3D5, temp >> 8);
+    outportb(0x3D4, 15);  // 设置光标低8位地址
+    outportb(0x3D5, temp);
+}
+
+/* 清空屏幕 */
+void cls()
+{
+    unsigned blank;
+    int i;
+
+    /* 带颜色的空格 */
+    blank = 0x20 | (attrib << 8);
+
+    /* 将整个屏幕用空格填充 */
+    for(i = 0; i < 25; i++)
+        memsetw (textmemptr + i * 80, blank, 80);
+
+    /* 更新虚拟坐标, 并移动光标 */
+    csr_x = 0;
+    csr_y = 0;
+    move_csr();
+}
+
+/* 打印单个字符 */
+void putch(unsigned char c)
+{
+    unsigned short *where;
+    unsigned att = attrib << 8;
+
+    /* 处理退格键, 往回移动光标一格 */
+    if(c == 0x08)
+    {
+        if(csr_x != 0) csr_x--;
+    }
+    /* 处理Tab键, 增大光标的x坐标, 并且只增加到x坐标可以整除8的位置 */
+    else if(c == 0x09)
+    {
+        csr_x = (csr_x + 8) & ~(8 - 1);
+    }
+    /* 处理回车键, 将光标回退到行首 */
+    else if(c == '\r')
+    {
+        csr_x = 0;
+    }
+    /* 处理换行, 光标移动到下一行行首 */
+    else if(c == '\n')
+    {
+        csr_x = 0;
+        csr_y++;
+    }
+    /* 所有ASCII值大于等于空格的字符都是可打印的字符 */
+    else if(c >= ' ')
+    {
+        where = textmemptr + (csr_y * 80 + csr_x);
+        *where = c | att;	/* 设置字符和颜色 */
+        csr_x++;
+    }
+
+    /* 当光标到达屏幕又边界, 移动到下一行行首 */
+    if(csr_x >= 80)
+    {
+        csr_x = 0;
+        csr_y++;
+    }
+
+    /* 在需要的时候滚动屏幕, 并移动光标 */
+    scroll();
+    move_csr();
+}
+
+/* 使用putch来打印字符串 */
+void puts(unsigned char *text)
+{
+    int i;
+
+    for (i = 0; i < strlen(text); i++)
+    {
+        putch(text[i]);
+    }
+}
+
+/* 设置前景色和背景色 */
+void settextcolor(unsigned char forecolor, unsigned char backcolor)
+{
+    /* 前4bit为背景色, 后4bit为前景色 */
+    attrib = (backcolor << 4) | (forecolor & 0x0F);
+}
+
+/* 设置文本模式VGA指针, 并清屏 */
+void init_video(void)
+{
+    textmemptr = (unsigned short *)0xB8000;
+    cls();
+}
+
+```
+
+&emsp;&emsp;接下来我们需要将它编译进内核中。首先需要在"build.bat"中添加一行gcc编译命令。复制编译"main.c"的那行命令, 在它的下面一行粘贴, 然后将里面的"main"修改为"scrn"即可。还有, 不要忘记把"scrn.o"添加到链接文件的列表中。为了让main函数能调用"scrn.c"文件中的这些函数, 需要将`putch`、`puts`、`cls`、`init_video`和`settextcolor`的函数原型添加到"system.h"中, 不要忘记"extern"关键字, 因为它们都是函数原型。
+
+> system.h
+
+```cpp
+extern void cls();
+extern void putch(unsigned char c);
+extern void puts(unsigned char *str);
+extern void settextcolor(unsigned char forecolor, unsigned char backcolor);
+extern void init_video();
+```
+
+&emsp;&emsp;现在可以在main函数中调用我们的屏幕打印函数了。打开"main.c"文件, 添加一行调用`init_video()`函数, 然后使用`puts()`打印"Hello World!", 最后保存所有修改, 运行"build.bat"文件, 调试所有语法错误。将"kernel.bin"复制到你的GRUB软盘上, 如果一切顺利, 你讲在你的黑底的屏幕上看见白色的"Hello World!"文本。

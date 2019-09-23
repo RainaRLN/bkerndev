@@ -1,6 +1,6 @@
 #include <system.h>
 
-unsigned char *memcpy(unsigned char *dest, const unsigned char *src, int count)
+void *memcpy(void *dest, const void *src, int count)
 {
     const unsigned char *sp = (const unsigned char *)src;
     unsigned char *dp = dest;
@@ -8,7 +8,7 @@ unsigned char *memcpy(unsigned char *dest, const unsigned char *src, int count)
     return dest;
 }
 
-unsigned char *memset(unsigned char *dest, unsigned char val, int count)
+void *memset(void *dest, unsigned char val, int count)
 {
     unsigned char *temp = (unsigned char *)dest;
     for( ; count != 0; count--) *temp++ = val;
@@ -47,11 +47,14 @@ void outportb (unsigned short _port, unsigned char _data)
 }
 
 /* 这是一个非常简单的main函数, 它内部仅进行死循环 */
-void main()
+int main()
 {
     /* 你可以在这里添加语句 */
+    init_video();
+    puts("Hello World!\n");
 
     /* 保留此循环
     *  不过, 在'start.asm'里也有一个无限循环, 防止你不小心删除了下面这一行*/
     for (;;);
+    return 0;
 }
