@@ -776,3 +776,149 @@ extern void init_video();
 ```
 
 &emsp;&emsp;现在可以在main函数中调用我们的屏幕打印函数了。打开"main.c"文件, 添加一行调用`init_video()`函数, 然后使用`puts()`打印"Hello World!", 最后保存所有修改, 运行"build.bat"文件, 调试所有语法错误。将"kernel.bin"复制到你的GRUB软盘上, 如果一切顺利, 你讲在你的黑底的屏幕上看见白色的"Hello World!"文本。
+
+## 06-全局描述符表(GDT)
+
+&emsp;&emsp;在386平台各种保护措施中最重要的就是全局描述符表(GDT)。GDT为内存的某些部分定义了基本的访问权限。我们可以使用GDT中的一个索引来生成段冲突异常, 让内核终止执行异常的进程。现代操作系统大多使用"分页"的内存模式来实现该功能, 它更具通用性和灵活性。GDT还定义了内存中的的某个部分是可执行程序还是实际的数据。GDT还可定义任务状态段(TSS)。TSS一般在基于硬件的多任务处理中使用, 所以我们在此并不做讨论。需要注意的是TSS并不是启用多任务的唯一方法。
+
+&emsp;&emsp;注意GRUB已经为你安装了一个GDT, 如果我们重写了加载GRUB的内存区域, 将会丢弃它的GDT, 这会导致"三重错误(Triple fault)"。简单的说, 它将重置机器。为了防止该问题的发生, 我们应该在已知可以访问的内存中构建自己的GDT, 并告诉处理器它在哪里, 最后使用我们的新索引加载处理器的CS、DS、ES、FS和GS寄存器。CS寄存器就是代码段, 它告诉处理器执行当前代码的访问权限在GDT中的偏移量。DS寄存器的作用类似, 但是数据段, 定义了当前数据的访问权限的偏移量。ES、FS和GS是备用的DS寄存器, 对我们并不重要。
+
+&emsp;&emsp;GDT本身是64位的长索引列表。这些索引定义了内存中可访问区域的起始位置和大小界限, 以及与该索引关联的访问权限。通常第一个索引, 0号索引被称为NULL描述符。所以我们不应该将任何的段寄存器设置为0, 否则将导致常见的保护错误, 这也是处理器的保护功能。通用的保护错误和几种异常将在中断服务程序(ISR)那节详细说明。
+
+&emsp;&emsp;每个GDT索引还定义了处理器正在运行的当前段是供系统使用的(Ring 0)还是供应用程序使用的(Ring 3)。也有其他Ring级别, 但并不重要。当今主要的操作系统仅使用Ring 0和Ring 3。任何应用程序在尝试访问系统或Ring 0的数据时都会导致异常, 这种保护是为了防止应用程序导致内核崩溃。GDT的Ring级别用于告诉处理器是否允许其执行特殊的特权指令。具有特权的指令只能在更高的Ring级别上运行。例如"cli"和"sti"禁用和启用中断, 如果应用程序被允许使用这两个指令, 它就可以阻止内核的运行。你将在本教程的后续章节中了解更多有关中断的知识。
+
+&emsp;&emsp;GDT的描述符组成如下: 
+
+![1570523285417](/home/raina/Documents/Workspace/notes/markdownPics/bkerndev/1570523285417.png)
+
+- G: 段界限粒度(Granularity)
+  - G = 0: 长度单位为1字节
+  - G = 1: 长度单位为4KB
+- D: 操作数大小
+  - 0 = 16bit
+  - 1 = 32bit
+- L: 未使用为0
+- AVL: 保留位, 系统软件使用
+- P: 存在位, 段是否存在
+  - 1 = Yes
+  - 0 = No
+- DPL: Ring级别(0到3)
+- S: 描述符类型位
+  - S = 1: 存储段描述符, 数据段/代码段
+  - S = 0: 系统段描述符/门描述符)
+- TYPE: 段类型
+
+&emsp;&emsp;在我们的内核教程中, 我们将创建一个包含3个索引的GDT。一个用于''虚拟''描述符充当处理器内存保护功能的NULL段, 一个用于代码段, 一个用于数据段寄存器。使用汇编操作码`lgdt`告诉处理器我们新的GDT表在哪里。为`lgdt`提供一个指向48位的专用的全局描述符表寄存器(GDTR)的指针。该寄存器用来保存全局描述符信息, 0-15位表示GDT的边界位置(数值为表的长度-1), 16-47位存放GDT基地址。并且在我们访问GDT中不存在偏移的段时, 希望处理器可以立即创建一般保护错误)。
+
+&emsp;&emsp;我们可以使用3个索引的简单数组来定义GDT。对于我们的特殊GDTR指针, 我们只需要声明一个即可。我们称其为`gp`。创建一个新文件**gdt.c**。在**build.bat**中添加一行gcc命令来编译**gdt.c**, 并将**gdt.o**添加到LD链接文件列表中。下面这些代码组成了**gdt.c**的前半部分: 
+
+> gdt.c
+
+```c
+#include <system.h>
+
+/* 定义一个GDT索引. __attribute__((packed))用于防止编译器优化对齐 */
+struct gdt_entry
+{
+    unsigned short limit_low;
+    unsigned short base_low;
+    unsigned char base_middle;
+    unsigned char access;
+    unsigned char granularity;
+    unsigned char base_high;
+} __attribute__((packed));
+
+/* GDTR指针 */
+struct gdt_ptr
+{
+    unsigned short limit;
+    unsigned int base;
+} __attribute__((packed));
+
+/* 声明包含3个索引的GDT和GDTR指针gp */
+struct gdt_entry gdt[3];
+struct gdt_ptr gp;
+
+/* 这是start.asm中的函数, 用来加载新的段寄存器 */
+extern void gdt_flush();
+```
+
+&emsp;&emsp;`gdt_flush()`我们还没有定义, 该函数使用上面的GDTR指针来告诉处理器新的GDT所在位置, 并重新加载段寄存器, 最后跳转到我们的新代码段。现在我们在**start.asm**的`stublet`下的死循环后面添加下面的代码来定义`gdt_flush`: 
+
+> start.asm
+
+```assembly
+; 这将建立我们新的段寄存器
+; 通过长跳转来设置CS
+global _gdt_flush     ; 允许C源程序链接该函数
+extern _gp            ; 声明_gp为外部变量
+_gdt_flush:
+    lgdt [_gp]        ; 用_gp来加载GDT
+    mov ax, 0x10      ; 0x10是我们数据段在GDT中的偏移地址
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:flush2   ; 0x08是代码段的偏移地址, 长跳转
+flush2:
+    ret               ; 返回到C程序中
+```
+
+&emsp;&emsp;仅为GDT保留内存空间是不够的, 还需要将值写入每个GDT中, 设置`gp`指针, 再调用`gdt_flush`进行更新。定义`gdt_set_entry()`函数, 该函数使用函数参数的移位给GDT每个字段设置值。为了让**main.c**能够使用这些函数, 别忘了将它们添加到**system.h**中(至少需要把`gdt_install`添加进去)。下面为**gdt.c**的剩下部分: 
+
+> gdt.c
+
+```c
+/* 在全局描述符表中设置描述符 */
+void gdt_set_gate(int num, unsigned long base, unsigned long limit, unsigned char access, unsigned char gran)
+{
+    /* 设置描述符基地址 */
+    gdt[num].base_low = (base & 0xFFFF);
+    gdt[num].base_middle = (base >> 16) & 0xFF;
+    gdt[num].base_high = (base >> 24) & 0xFF;
+
+    /* 设置描述符边界 */
+    gdt[num].limit_low = (limit & 0xFFFF);
+    gdt[num].granularity = ((limit >> 16) & 0x0F);
+
+    /* 最后，设置粒度和访问标志 */
+    gdt[num].granularity |= (gran & 0xF0);
+    gdt[num].access = access;
+}
+
+/* 由main函数调用
+ * 设置GDTR指针, 设置GDT的3个索引条码
+ * 最后调用汇编中的gdt_flush告诉处理器新GDT的位置
+ * 并跟新新的段寄存器 */
+void gdt_install()
+{
+    /* 设置GDT指针和边界 */
+    gp.limit = (sizeof(struct gdt_entry) * 3) - 1;
+    gp.base = &gdt;
+
+    /* NULL描述符 */
+    gdt_set_gate(0, 0, 0, 0, 0);
+
+    /* 第2个索引是我们的代码段
+     * 基地址是0, 边界为4GByte, 粒度为4KByte
+     * 使用32位操作数, 是一个代码段描述符
+     * 对照本教程中GDT的描述符的表格
+     * 弄清每个值的含义 */
+    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
+
+    /* 第3个索引是数据段
+     * 与代码段几乎相同
+     * 但access设置为数据段 */
+    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+
+    /* 清除旧的GDT安装新的GDT */
+    gdt_flush();
+}
+```
+
+&emsp;&emsp;现在我们的GDT加载程序的基本结构已经到位, 在将其编译链接到内核中后, 我们需要在**main.c**中调用`gdt_install()`才能真正完成工作。在`main()`函数的第一行添加`gdt_install();`GDT加载必须最先初始化。现在, 编译你的内核, 并在软盘中对其进行测试, 你不会在屏幕上看到任何变化, 这是一个内部的更改。
+
+&emsp;&emsp;下面我们将进入中断描述符表(IDT)！
+
+

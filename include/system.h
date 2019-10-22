@@ -16,5 +16,9 @@ extern void puts(char *str);
 extern void settextcolor(char forecolor, char backcolor);
 extern void init_video();
 
+/* gdt.c */
+extern void gdt_set_gate(int num, unsigned long base, unsigned long limit, unsigned char access, unsigned char gran);
+extern void gdt_install();
+
 #endif
 

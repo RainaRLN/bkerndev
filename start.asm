@@ -38,7 +38,22 @@ stublet:
     jmp $
 
 
-; GDT加载代码(以后添加)
+; GDT加载代码
+; 这将建立我们新的段寄存器
+; 通过长跳转来设置CS
+global gdt_flush     ; 允许C源程序链接该函数
+extern gp            ; 声明_gp为外部变量
+gdt_flush:
+    lgdt [gp]        ; 用_gp来加载GDT
+    mov ax, 0x10      ; 0x10是我们数据段在GDT中的偏移地址
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:flush2   ; 0x08是代码段的偏移地址, 长跳转
+flush2:
+    ret               ; 返回到C程序中
 
 
 ; ISR代码(以后添加)
