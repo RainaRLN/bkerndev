@@ -49,9 +49,15 @@ void outportb (unsigned short _port, unsigned char _data)
 /* 这是一个非常简单的main函数, 它内部仅进行死循环 */
 int main()
 {
-    /* 你可以在这里添加语句 */
+    // int i;
+    
+    gdt_install();
+    idt_install();
     init_video();
     puts("Hello World!\n");
+
+    // i = 10 / 0;
+    // putch(i);
 
     /* 保留此循环
     *  不过, 在'start.asm'里也有一个无限循环, 防止你不小心删除了下面这一行*/
