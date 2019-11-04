@@ -921,4 +921,159 @@ void gdt_install()
 
 &emsp;&emsp;下面我们将进入中断描述符表(IDT)！
 
+### PS
 
+&emsp;&emsp;如果编译的时候报错: 
+
+> undefined reference to \`\_gp'
+> undefined reference to \`gdt\_flush'
+
+则把**start.asm**中`_gp`和`_gdt_flush`前面的下划线去掉再重新编译。
+
+
+
+## 07-中断描述符表(IDT)
+
+&emsp;&emsp;中断描述符表(IDT)用于告诉处理器调用哪个中断服务程序(ISR)来处理异常或汇编中的"int"指令。每当设备完成请求并需要服务事, 中断请求也会调用IDT条目。异常和ISR将在下一节进行详细的说明。
+
+&emsp;&emsp;每一项IDT都与GDT相似, 两者都有一个基地址, 一个访问标志, 而且都长64bits。这两类描述符表最主要的区别在于这些字段的含义: 在IDT中的基地址是中断时应调用的ISR的地址。IDT也没有边界(limit), 而是需要一个指定的段, 该段与给定的ISR所在段相同。这让处理器即使处于不同级别的Ring中, 在发生中断时也能将控制权交给内核。
+
+&emsp;&emsp;IDT条目的访问标志位也和GDT相似。需要一个字段说明描述符是否存在。描述符特权级别(DPL)用于说明哪个Ring是给定中断允许使用的最高级别。主要区别在于访问字节的低5位始终为二进制01110, 也就是十进制中的14。下面这张表让你更好地理解IDT访问字节。
+
+<table>
+			<tbody><tr>
+				<td>
+					<table cols="25, 25, 25, 25, 100">
+						<tbody><tr>
+							<td width="25" align="center">7</td>
+							<td width="25" align="left">6</td>
+							<td width="25" align="right">5</td>
+							<td width="25" align="left">4</td>
+							<td width="100" align="right">0</td>
+						</tr>
+					</tbody></table>
+				</td>
+			</tr>
+			<tr>
+				<td>
+					<table cols="25, 50, 125" bordercolor="#808080" border="1">
+						<tbody><tr>
+							<td width="25">
+								P
+							</td>
+							<td width="50">
+								DPL
+							</td>
+							<td width="125">
+								Always 01110 (14)
+							</td>
+						</tr>
+					</tbody></table>
+				</td>
+			</tr>
+			<tr>
+				<td>
+					P - 段是否存在? (1 = Yes)<br>
+					DPL - 哪个Ring (0~3)<br>
+				</td>
+			</tr>
+		</tbody></table>
+
+&emsp;&emsp;在你的自制内核目录下创建一个新文件**"idt.c"**。编辑**"build.bat"**文件, 添加新的一行gcc命令编译**"idt.c"**。最后添加**"idt.o"**到链接文件列表中。**"idt.c"**中将会声明一个结构体用于定义每个IDT条目,  和一个用于加载IDT的特殊IDT指针结构体(类似于加载GDT, 但工作量更少), 并声明一个256大小的IDT数组: 这将成为我们的IDT。
+
+> idt.c
+
+```c
+#include <system.h>
+
+/* 定义IDT条目 */
+struct idt_entry
+{
+    unsigned short base_lo;
+    unsigned short sel;        /* 我们的内核段在这里 */
+    unsigned char always0;     /* 这将始终为0! */
+    unsigned char flags;       /* 根据上表进行设置! */
+    unsigned short base_hi;
+} __attribute__((packed));  // 不进行对齐优化
+
+struct idt_ptr
+{
+    unsigned short limit;
+    unsigned int base;
+} __attribute__((packed));
+
+/* 声明一个有256个条目的IDT, 尽管在本教程中我们只会使用前32个。
+ * 剩下的存在一点小陷阱, 如果任何未定义的IDT被集中, 
+ * 将会导致"未处理的中断(Unhandled Interrupt)"异常,
+ * 描述符的"presence"位如果为0, 将生成"未处理的中断"异常。*/
+struct idt_entry idt[256];
+struct idt_ptr idtp;
+
+/*该函数在"start.asm"中定义, 用于加载我们的IDT */
+extern void idt_load();
+```
+
+&emsp;&emsp;`idt_load`函数的函数定义在其他文件中, 和`gdt_flash`一样是使用汇编语言编写的。我们之后将在`idt_install`中使用创建的IDT指针来调用`lidt`汇编操作码。打开**"start.asm"**文件, 把下面几行添加到`_gdt_flush`的`re`后面。
+
+> start.asm
+
+```assembly
+; 加载idtp指针所指的IDT到处理器中
+; 这在C文件中声明为"extern void idt_load();"
+global _idt_load
+extern _idtp
+_idt_load:
+    lidt [_idtp]
+    ret
+```
+
+&emsp;&emsp;设置IDT条目比GDT简单得多。我们又一个`idt_set_gate`函数用于接收IDT索引号、中断服务程序基地址、内核代码段以及上表中提到的访问标志。同样, 我们又一个`idt_install`函数用来设置IDT指针, 并将IDT初始化为默认清除状态。最后, 我们将通过调用`idt_load`来加载IDT。在加载IDT后, 我们可以随时将ISR添加到IDT中。本教程将在下一节介绍ISR。下面是**"idt.c"**文件的剩余部分, 请尝试弄明白`idt_set_gate`函数, 它其实很简单。
+
+> idt.c
+
+```c
+/* 使用该函数来设置每项IDT*/
+void idt_set_gate(unsigned char num, unsigned long base, unsigned short sel, unsigned char flags)
+{
+    /* 该函数的代码将留给你来实现: 
+     * 将参数"base"分为高16位和低16位,
+     * 将它们存储在idt[num].base_hi和idt[num].base_lo中
+     * 剩下的需要设置idt[num]的其他成员的值 */
+}
+
+/* 安装IDT */
+void idt_install()
+{
+    /* 设置IDT指针 */
+    idtp.limit = (sizeof (struct idt_entry) * 256) - 1;
+    idtp.base = &idt;
+
+    /* 清空整个IDT, 并初始化该片区域为0 */
+    memset(&idt, 0, sizeof(struct idt_entry) * 256);
+
+    /* 使用idt_set_gate将ISR添加到IDT中 */
+
+    /* 将处理器的内部寄存器指向新的IDT */
+    idt_load();
+}
+```
+
+&emsp;&emsp;最后, 确保在**"system.h"**中添加`idt_set_gate`和`idt_install`作为函数原型, 因为我们需要从其他文件(例如**"main.c"**)中调用这些函数。在`main()`函数调用了`gdt_install`后立即调用`idt_install`。这是你应该可以成功编译你的内核。尝试使用一下你的新内核, 在进行除零之类的非法操作时, 计算机将重置。我们可以通过在新的IDT中安装ISR来不活这些异常。
+
+&emsp;&emsp;如果你不知道怎么编写`idt_set_gate`, 则可以在此处找到本教程的解决方案。
+
+> idt.c
+
+```c
+void idt_set_gate(unsigned char num, unsigned long base, unsigned short sel, unsigned char flags)
+{
+    /* 中断程序的基地址 */
+    idt[num].base_lo = (base & 0xFFFF);
+    idt[num].base_hi = (base >> 16) & 0xFFFF;
+
+    /* 该IDT使用的段或区域以及访问标志位将在此设置 */
+    idt[num].sel = sel;
+    idt[num].always0 = 0;
+    idt[num].flags = flags;
+}
+```

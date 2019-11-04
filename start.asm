@@ -54,10 +54,16 @@ gdt_flush:
     jmp 0x08:flush2   ; 0x08是代码段的偏移地址, 长跳转
 flush2:
     ret               ; 返回到C程序中
+    
+; 加载idtp指针所指的IDT到处理器中
+; 这在C文件中声明为"extern void idt_load();"
+global idt_load
+extern idtp
+idt_load:
+    lidt [idtp]
+    ret
 
-
-; ISR代码(以后添加)
-
+; ISR代码
 
 
 ; BSS区的定义
