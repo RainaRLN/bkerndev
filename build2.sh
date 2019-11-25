@@ -5,9 +5,10 @@ gcc -Wall -fno-pic -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protect
 gcc -Wall -fno-pic -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protector -I./include -c -o scrn.o scrn.c
 gcc -Wall -fno-pic -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protector -I./include -c -o gdt.o gdt.c
 gcc -Wall -fno-pic -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protector -I./include -c -o idt.o idt.c
+gcc -Wall -fno-pic -m32 -ggdb -gstabs+ -nostdinc -fno-builtin -fno-stack-protector -I./include -c -o isrs.o isrs.c
 
 # This links all your files. Remember that as you add *.o files, you need to
 # add them after start.o. If you don't add them at all, they won't be in your kernel!
-ld -T link.ld -m elf_i386 -nostdlib -o kernel.bin start.o main.o scrn.o gdt.o idt.o
+ld -T link.ld -m elf_i386 -nostdlib -o kernel.bin start.o main.o scrn.o gdt.o idt.o isrs.o
 echo "Done!"
 read -p "Press a key to continue..."

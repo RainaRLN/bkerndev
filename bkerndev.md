@@ -1,4 +1,4 @@
-01-前言
+## 01-前言
 
 &emsp;&emsp;内核开发不是件容易的事, 这是对一个程序员编程能力的考验。开发内核其实就是开发一个能够与硬件交互和管理硬件的软件。内核也是一个操作系统的核心, 是管理硬件资源的逻辑。
 
@@ -1077,3 +1077,583 @@ void idt_set_gate(unsigned char num, unsigned long base, unsigned short sel, uns
     idt[num].flags = flags;
 }
 ```
+
+## 08-中断服务程序(ISR)
+
+&emsp;&emsp;中断服务程序(ISR)用于保存当前处理器的状态, 并在调用内核的C级中断处理程序之前正确设置内核模式所需的段寄存器。而工作只需要15到20行汇编代码来处理, 包括调用C中的处理程序。我们还需要将IDT条目指向正确的ISR以正确处理异常。
+
+&emsp;&emsp;异常是导致处理器无法正常执行的特殊情况, 比如除以0结果是未知数或者非实数, 因此处理器会抛出异常, 这样内核就可以阻止进程或任务引起任何问题。如果处理器发现程序正尝试访问不允许其访问的内存, 则会引起一般保护错误。当你设置内存页时, 处理器将会产生页面错误, 但这是可以恢复的: 你可以将内存页映射到错误的地址(但这需要另开一篇教程来讲解)。
+
+&emsp;&emsp;IDT的前32个条目与处理器可能产生的异常对应, 因此需要对其进行处理。某些异常会将另一个值压入堆栈中: 错误代码, 该值为每个异常的特定代码。
+
+<table>
+<tbody><tr>
+				<th width="100" align="left">
+					Exception #
+				</th>
+				<th width="300" align="left">
+					Description
+				</th>
+				<th width="100" align="left">
+					Error Code?
+				</th>
+			</tr>
+			<tr>
+				<td width="100">0</td>
+				<td width="300">Division By Zero Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">1</td>
+				<td width="300">Debug Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">2</td>
+				<td width="300">Non Maskable Interrupt Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">3</td>
+				<td width="300">Breakpoint Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">4</td>
+				<td width="300">Into Detected Overflow Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">5</td>
+				<td width="300">Out of Bounds Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">6</td>
+				<td width="300">Invalid Opcode Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">7</td>
+				<td width="300">No Coprocessor Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">8</td>
+				<td width="300">Double Fault Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">9</td>
+				<td width="300">Coprocessor Segment Overrun Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">10</td>
+				<td width="300">Bad TSS Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">11</td>
+				<td width="300">Segment Not Present Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">12</td>
+				<td width="300">Stack Fault Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">13</td>
+				<td width="300">General Protection Fault Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">14</td>
+				<td width="300">Page Fault Exception</td>
+				<td width="100">Yes</td>
+			</tr>
+			<tr>
+				<td width="100">15</td>
+				<td width="300">Unknown Interrupt Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">16</td>
+				<td width="300">Coprocessor Fault Exception</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">17</td>
+				<td width="300">Alignment Check Exception (486+)</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">18</td>
+				<td width="300">Machine Check Exception (Pentium/586+)</td>
+				<td width="100">No</td>
+			</tr>
+			<tr>
+				<td width="100">19 to 31</td>
+				<td width="300">Reserved Exceptions</td>
+				<td width="100">No</td>
+			</tr>
+		</tbody>
+</table>
+
+&emsp;&emsp;之前提到, 一些异常会错误码压入堆栈中, 为了降低复杂度, 我们为尚未压入错误码的ISR将伪错误码0压入堆栈中, 这样可以保持统一的堆栈结构。为了跟踪触发的是哪个异常, 我们将中断号也压入堆栈。我们使用汇编操作码"cli"来禁用中断并防止触发IRQ, 否则可能会导致内核冲突。为了节省内核空间, 生成较小的二进制文件, 我们让每个ISR的存根(stub)跳转到通用`isr_common_stub`函数。`isr_common_stub`用于将处理器的状态保存到堆栈上, 将当前堆栈地址压入堆栈(为我们的C处理程序提供堆栈), 调用C中的`fault_handler`函数, 最后恢复堆栈的状态。在**"start.asm"**预留的位置中添加下面的代码, 填写所有的32个ISR: 
+
+> start.asm
+
+```assembly
+; 在之后的教程中, 我们将添加中断
+; 这里是中断服务程序(ISR)
+global _isr0
+global _isr1
+global _isr2
+global _isr3
+global _isr4
+global _isr5
+global _isr6
+global _isr7
+global _isr8
+global _isr9
+global _isr10
+global _isr11
+global _isr12
+global _isr13
+global _isr14
+global _isr15
+global _isr16
+global _isr17
+global _isr18
+global _isr19
+global _isr20
+global _isr21
+global _isr22
+global _isr23
+global _isr24
+global _isr25
+global _isr26
+global _isr27
+global _isr28
+global _isr29
+global _isr30
+global _isr31
+
+;  0: 除以零异常
+_isr0:
+    cli
+    push byte 0    ; 一个ISR占位符, 会弹出一个为错误码来保持一个统一的堆栈框架
+    push byte 0
+    jmp isr_common_stub
+
+;  1: 调试异常
+_isr1:
+    cli
+    push byte 0
+    push byte 1
+    jmp isr_common_stub
+    
+;  2: 不可屏蔽的中断异常
+_isr2:
+    cli
+    push byte 0
+    push byte 2
+    jmp isr_common_stub
+
+;  3: Int 3异常
+_isr3:
+    cli
+    push byte 0
+    push byte 3
+    jmp isr_common_stub
+
+;  4: INTO异常
+_isr4:
+    cli
+    push byte 0
+    push byte 4
+    jmp isr_common_stub
+
+;  5: 越界异常
+_isr5:
+    cli
+    push byte 0
+    push byte 5
+    jmp isr_common_stub
+
+;  6: 无效的操作码异常
+_isr6:
+    cli
+    push byte 0
+    push byte 6
+    jmp isr_common_stub
+
+;  7: 协处理器不可用异常
+_isr7:
+    cli
+    push byte 0
+    push byte 7
+    jmp isr_common_stub
+
+;  8: 双重故障异常(带错误码！)
+_isr8:
+    cli
+    push byte 8        ; 注意我们不需要在此压入一个值到堆栈中, 它已经压入了一个。
+                   ; 会弹出错误码的异常可使用这类存根
+    jmp isr_common_stub
+
+;  9: 协处理器段溢出异常
+_isr9:
+    cli
+    push byte 0
+    push byte 9
+    jmp isr_common_stub
+
+; 10: 错误的TSS异常(带错误码！)
+_isr10:
+    cli
+    push byte 10
+    jmp isr_common_stub
+
+; 11: 段不存在异常(带错误码！)
+_isr11:
+    cli
+    push byte 11
+    jmp isr_common_stub
+
+; 12: 堆栈故障异常(带错误码！)
+_isr12:
+    cli
+    push byte 12
+    jmp isr_common_stub
+
+; 13: 常规保护故障异常(带错误码！)
+_isr13:
+    cli
+    push byte 13
+    jmp isr_common_stub
+
+; 14: 页面错误异常(带错误码！)
+_isr14:
+    cli
+    push byte 14
+    jmp isr_common_stub
+
+; 15: 保留异常
+_isr15:
+    cli
+    push byte 0
+    push byte 15
+    jmp isr_common_stub
+
+; 16: 浮点异常
+_isr16:
+    cli
+    push byte 0
+    push byte 16
+    jmp isr_common_stub
+
+; 17: 对齐检查异常
+_isr17:
+    cli
+    push byte 0
+    push byte 17
+    jmp isr_common_stub
+
+; 18: 机器检查异常
+_isr18:
+    cli
+    push byte 0
+    push byte 18
+    jmp isr_common_stub
+
+; 19: 保留
+_isr19:
+    cli
+    push byte 0
+    push byte 19
+    jmp isr_common_stub
+
+; 20: 保留
+_isr20:
+    cli
+    push byte 0
+    push byte 20
+    jmp isr_common_stub
+
+; 21: 保留
+_isr21:
+    cli
+    push byte 0
+    push byte 21
+    jmp isr_common_stub
+
+; 22: 保留
+_isr22:
+    cli
+    push byte 0
+    push byte 22
+    jmp isr_common_stub
+
+; 23: 保留
+_isr23:
+    cli
+    push byte 0
+    push byte 23
+    jmp isr_common_stub
+
+; 24: 保留
+_isr24:
+    cli
+    push byte 0
+    push byte 24
+    jmp isr_common_stub
+
+; 25: 保留
+_isr25:
+    cli
+    push byte 0
+    push byte 25
+    jmp isr_common_stub
+
+; 26: 保留
+_isr26:
+    cli
+    push byte 0
+    push byte 26
+    jmp isr_common_stub
+
+; 27: 保留
+_isr27:
+    cli
+    push byte 0
+    push byte 27
+    jmp isr_common_stub
+
+; 28: 保留
+_isr28:
+    cli
+    push byte 0
+    push byte 28
+    jmp isr_common_stub
+
+; 29: 保留
+_isr29:
+    cli
+    push byte 0
+    push byte 29
+    jmp isr_common_stub
+
+; 30: 保留
+_isr30:
+    cli
+    push byte 0
+    push byte 30
+    jmp isr_common_stub
+
+; 31: 保留
+_isr31:
+    cli
+    push byte 0
+    push byte 31
+    jmp isr_common_stub
+
+; 我们在这里调用C函数
+; 我们需要让汇编器知道"_fault_handler"在另一个文件中
+extern _fault_handler
+
+; 这是我们ISR的通用存根
+; 它用于保存处理器的状态, 设置内核模式段, 调用C里的故障处理程序
+; 最后恢复堆栈框架
+isr_common_stub:
+    pusha
+    push ds
+    push es
+    push fs
+    push gs
+    mov ax, 0x10   ; 加载内核数据段描述符
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov eax, esp   ; 将指向堆栈的指针压入堆栈
+    push eax
+    mov eax, _fault_handler
+    call eax       ; 特殊调用, 保存"eip"寄存器的值
+    pop eax
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popa
+    add esp, 8     ; 清除压入的错误码和ISR号
+    iret           ; 将CS、EIP、EFLAGS、SS和ESP一同弹出
+```
+
+&emsp;&emsp;创建一个新文件, 命名为**"isrs.c"**。别忘了在**"build.bat"**文件中添加一行GCC命令编译该文件。将文件**"isrs.o"**添加到LD文件列表中,  这样才能将其链接到内核中。**"isrs.c"**文件很简单: 首先是常规的#include行, 声明"start.asm"中每个ISR的原型, 将IDT条目指向正确的ISR, 最后创建一个中断处理程序来服务我们所有的异常。
+
+> isrs.c
+
+```c
+#include <system.h>
+
+/* 这里是所有异常处理程序的原型: 
+ * IDT的前32个条目由英特尔保留, 
+ * 用于处理异常 */
+extern void isr0();
+extern void isr1();
+extern void isr2();
+extern void isr3();
+extern void isr4();
+extern void isr5();
+extern void isr6();
+extern void isr7();
+extern void isr8();
+extern void isr9();
+extern void isr10();
+extern void isr11();
+extern void isr12();
+extern void isr13();
+extern void isr14();
+extern void isr15();
+extern void isr16();
+extern void isr17();
+extern void isr18();
+extern void isr19();
+extern void isr20();
+extern void isr21();
+extern void isr22();
+extern void isr23();
+extern void isr24();
+extern void isr25();
+extern void isr26();
+extern void isr27();
+extern void isr28();
+extern void isr29();
+extern void isr30();
+extern void isr31();
+
+/* 我们将IDT的前32个条目设置为前32个ISR
+ * 这里我们无法使用for循环, 因为无法获取与之对应的函数名
+ * 我们将访问标志设置为0x8E, 代表条目存在, 并在Ring 0(内核级别)中运行 
+ * 并将低5位设置为要求的"14", 用十六进制的"E"表示 */
+void isrs_install()
+{
+    idt_set_gate(0, (unsigned)isr0, 0x08, 0x8E);
+    idt_set_gate(1, (unsigned)isr1, 0x08, 0x8E);
+    idt_set_gate(2, (unsigned)isr2, 0x08, 0x8E);
+    idt_set_gate(3, (unsigned)isr3, 0x08, 0x8E);
+    idt_set_gate(4, (unsigned)isr4, 0x08, 0x8E);
+    idt_set_gate(5, (unsigned)isr5, 0x08, 0x8E);
+    idt_set_gate(6, (unsigned)isr6, 0x08, 0x8E);
+    idt_set_gate(7, (unsigned)isr7, 0x08, 0x8E);
+
+    idt_set_gate(8, (unsigned)isr8, 0x08, 0x8E);
+    idt_set_gate(9, (unsigned)isr9, 0x08, 0x8E);
+    idt_set_gate(10, (unsigned)isr10, 0x08, 0x8E);
+    idt_set_gate(11, (unsigned)isr11, 0x08, 0x8E);
+    idt_set_gate(12, (unsigned)isr12, 0x08, 0x8E);
+    idt_set_gate(13, (unsigned)isr13, 0x08, 0x8E);
+    idt_set_gate(14, (unsigned)isr14, 0x08, 0x8E);
+    idt_set_gate(15, (unsigned)isr15, 0x08, 0x8E);
+
+    idt_set_gate(16, (unsigned)isr16, 0x08, 0x8E);
+    idt_set_gate(17, (unsigned)isr17, 0x08, 0x8E);
+    idt_set_gate(18, (unsigned)isr18, 0x08, 0x8E);
+    idt_set_gate(19, (unsigned)isr19, 0x08, 0x8E);
+    idt_set_gate(20, (unsigned)isr20, 0x08, 0x8E);
+    idt_set_gate(21, (unsigned)isr21, 0x08, 0x8E);
+    idt_set_gate(22, (unsigned)isr22, 0x08, 0x8E);
+    idt_set_gate(23, (unsigned)isr23, 0x08, 0x8E);
+
+    idt_set_gate(24, (unsigned)isr24, 0x08, 0x8E);
+    idt_set_gate(25, (unsigned)isr25, 0x08, 0x8E);
+    idt_set_gate(26, (unsigned)isr26, 0x08, 0x8E);
+    idt_set_gate(27, (unsigned)isr27, 0x08, 0x8E);
+    idt_set_gate(28, (unsigned)isr28, 0x08, 0x8E);
+    idt_set_gate(29, (unsigned)isr29, 0x08, 0x8E);
+    idt_set_gate(30, (unsigned)isr30, 0x08, 0x8E);
+    idt_set_gate(31, (unsigned)isr31, 0x08, 0x8E);
+}
+
+/* 这里是一个简单的字符串数组, 包含与每个异常对应的消息
+ * 我们通过这种方式来获得对应的消息: 
+ * exception_message[interrupt_number] */
+unsigned char *exception_messages[] =
+{
+    "Division By Zero",
+    "Debug",
+    "Non Maskable Interrupt",
+    "Breakpoint",
+    "Into Detected Overflow",
+    "Out of Bounds",
+    "Invalid Opcode",
+    "No Coprocessor",
+
+    "Double Fault",
+    "Coprocessor Segment Overrun",
+    "Bad TSS",
+    "Segment Not Present",
+    "Stack Fault",
+    "General Protection Fault",
+    "Page Fault",
+    "Unknown Interrupt",
+
+    "Coprocessor Fault",
+    "Alignment Check",
+    "Machine Check",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved",
+    "Reserved"
+};
+
+/* 我们所有的异常处理中断服务程序都将指向此函数, 这会告诉我们发生了什么异常
+ * 现在我们只是通过死循环来暂停系统
+ * 当所有ISR被用作“锁定”机制时，它们会禁用中断，以防止IRQ的发生并破坏内核数据结构 */
+void fault_handler(struct regs *r)
+{
+    /* 判断是否是中断号为0~31的错误 */
+    if (r->int_no < 32)
+    {
+        /* 显示发生的异常的描述
+         * 本教程中我们简单地使用一个死循环来暂停系统 */
+        puts(exception_messages[r->int_no]);
+        puts(" Exception. System Halted!\n");
+        for (;;);
+    }
+}
+```
+
+&emsp;&emsp;等一下, 在`fault_handler`函数的参数中有一个新的结构体`struct regs`我们还没有定义。`regs`向C代码展示了堆栈的框架结构。还记得吗, 我们在"start.asm"中我们将指向堆栈本身的指针压入堆栈, 这样我们就可以从处理程序中获取错误码和中断号。这种设计方式让我们能使用一个C程序来处理不同的ISR, 并可以确定发生的是哪个异常或中断。
+
+&emsp;&emsp;在**"system.h"**中定义堆栈框架: 
+
+> system.h
+
+```c
+/* 这定义了ISR运行后的堆栈结构 */
+struct regs
+{
+    unsigned int gs, fs, es, ds;      /* 这些段最后压入 */
+    unsigned int edi, esi, ebp, esp, ebx, edx, ecx, eax;  /* 通过"pusha"压入栈中 */
+    unsigned int int_no, err_code;
+    unsigned int eip, cs, eflags, useresp, ss;   /* 由处理器自动压入堆栈 */ 
+};
+```
+
+&emsp;&emsp;打开**"system.h"**文件, 添加`reg`结构体的定义和`isrs_install`函数原型, 以便我们在"main.c"中调用。最后, 在`main`函数中安装IDT的后面调用`isrs_install`。现在可以在我们新的内核中测试一下我们的异常处理程序了。
+
+&emsp;&emsp;可选操作: 在**"main.c"**中添加一些测试代码, 该代码进行除以0操作。当处理器遇到该错误, 将会产生"Divide By Zero"异常, 并在屏幕上打印。测试成功后, 你可以删除这些测试代码。
